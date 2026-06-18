@@ -100,7 +100,7 @@ CelebDF-v2 settings:
 
 ## Output Structure
 
-The scripts split videos separately for real and fake labels using an 80:10:10 train/val/test ratio, then extract frames after splitting to avoid data leakage.
+The scripts extract the configured number of frames from every video first, then shuffle all successfully saved face crops with `--seed` and split them into train/val/test using an 80:10:10 ratio. Because splitting happens at frame level, frames from the same source video can appear in more than one split.
 
 ```text
 output_root/
@@ -126,7 +126,6 @@ ffpp_train_fake_Deepfakes_001_002_frame000128.jpg
 At the end, each script prints:
 
 - Number of real/fake videos.
-- Number of real/fake videos in each split.
-- Number of saved real/fake face images in each split.
+- Number of saved real/fake face images in each frame-level split.
 - Number of skipped frames where no face/readable crop was detected.
 - Number of failed videos.

@@ -1,6 +1,8 @@
 import argparse
 import random
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -31,6 +33,14 @@ class VideoItem:
     path: Path
     label: str
     source: str
+
+
+@dataclass(frozen=True)
+class ExtractedFrame:
+    temp_path: Path
+    label: str
+    video_id: str
+    frame_index: int
 
 
 @dataclass
@@ -110,7 +120,7 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--output_root", required=True, type=Path, help="Folder to write cropped face images")
     parser.add_argument("--scrfd_model", required=True, type=Path, help="Path to SCRFD ONNX model")
     parser.add_argument("--img_size", default=380, type=int, help="Output face crop size in pixels")
-    parser.add_argument("--seed", default=42, type=int, help="Random seed for video-level split")
+    parser.add_argument("--seed", default=42, type=int, help="Random seed for frame-level split")
     return parser
 
 
@@ -137,24 +147,6 @@ def collect_videos(input_root: Path, real_dirs: Sequence[str], fake_dirs: Sequen
             items.append(VideoItem(path=path, label="fake", source=dirname))
 
     return items
-
-
-def split_items_by_label(items: Sequence[VideoItem], seed: int) -> Dict[str, Dict[str, List[VideoItem]]]:
-    rng = random.Random(seed)
-    result = {split: {"real": [], "fake": []} for split in SPLITS}
-
-    for label in LABELS:
-        label_items = sorted((item for item in items if item.label == label), key=lambda item: str(item.path))
-        rng.shuffle(label_items)
-        n_items = len(label_items)
-        n_train = int(n_items * 0.8)
-        n_val = int(n_items * 0.1)
-
-        result["train"][label] = label_items[:n_train]
-        result["val"][label] = label_items[n_train:n_train + n_val]
-        result["test"][label] = label_items[n_train + n_val:]
-
-    return result
 
 
 def ensure_output_dirs(output_root: Path) -> None:
@@ -203,38 +195,42 @@ def safe_video_id(video_path: Path, input_root: Path) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", rel_no_suffix).strip("_")
 
 
-def save_face(
+def write_face(
     face_bgr: np.ndarray,
+    output_path: Path,
+    img_size: int,
+) -> bool:
+    resized = cv2.resize(face_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+    return bool(cv2.imwrite(str(output_path), resized, [int(cv2.IMWRITE_JPEG_QUALITY), 95]))
+
+
+def final_frame_path(
     output_root: Path,
     dataset_name: str,
     split: str,
     label: str,
     video_id: str,
     frame_index: int,
-    img_size: int,
-) -> bool:
-    resized = cv2.resize(face_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+) -> Path:
     filename = f"{dataset_name}_{split}_{label}_{video_id}_frame{frame_index:06d}.jpg"
-    output_path = output_root / split / label / filename
-    return bool(cv2.imwrite(str(output_path), resized, [int(cv2.IMWRITE_JPEG_QUALITY), 95]))
+    return output_root / split / label / filename
 
 
 def process_video(
     item: VideoItem,
     input_root: Path,
-    output_root: Path,
-    dataset_name: str,
-    split: str,
+    temp_dir: Path,
     num_frames: int,
     detector: SCRFDDetector,
     img_size: int,
     stats: Stats,
-) -> None:
+) -> List[ExtractedFrame]:
+    extracted: List[ExtractedFrame] = []
     cap = cv2.VideoCapture(str(item.path))
     if not cap.isOpened():
         print(f"[WARN] Cannot open video: {item.path}")
         stats.failed_videos += 1
-        return
+        return extracted
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_indices = evenly_spaced_frame_indices(total_frames, num_frames)
@@ -242,7 +238,7 @@ def process_video(
         print(f"[WARN] Empty or unreadable video: {item.path}")
         stats.failed_videos += 1
         cap.release()
-        return
+        return extracted
 
     video_id = safe_video_id(item.path, input_root)
     for frame_index in frame_indices:
@@ -262,10 +258,56 @@ def process_video(
             stats.skipped_no_face += 1
             continue
 
-        if save_face(face, output_root, dataset_name, split, item.label, video_id, frame_index, img_size):
-            stats.image_counts[split][item.label] += 1
+        temp_filename = f"{item.label}_{video_id}_frame{frame_index:06d}.jpg"
+        temp_path = temp_dir / temp_filename
+        if write_face(face, temp_path, img_size):
+            extracted.append(
+                ExtractedFrame(
+                    temp_path=temp_path,
+                    label=item.label,
+                    video_id=video_id,
+                    frame_index=frame_index,
+                )
+            )
 
     cap.release()
+    return extracted
+
+
+def split_extracted_frames(frames: Sequence[ExtractedFrame], seed: int) -> Dict[str, List[ExtractedFrame]]:
+    rng = random.Random(seed)
+    shuffled = sorted(frames, key=lambda frame: str(frame.temp_path))
+    rng.shuffle(shuffled)
+
+    n_frames = len(shuffled)
+    n_train = int(n_frames * 0.8)
+    n_val = int(n_frames * 0.1)
+
+    return {
+        "train": shuffled[:n_train],
+        "val": shuffled[n_train:n_train + n_val],
+        "test": shuffled[n_train + n_val:],
+    }
+
+
+def move_frames_to_splits(
+    frames_by_split: Dict[str, List[ExtractedFrame]],
+    output_root: Path,
+    dataset_name: str,
+    stats: Stats,
+) -> None:
+    for split in SPLITS:
+        for frame in tqdm(frames_by_split[split], desc=f"{dataset_name} move {split}", unit="frame"):
+            output_path = final_frame_path(
+                output_root=output_root,
+                dataset_name=dataset_name,
+                split=split,
+                label=frame.label,
+                video_id=frame.video_id,
+                frame_index=frame.frame_index,
+            )
+            shutil.move(str(frame.temp_path), str(output_path))
+            stats.image_counts[split][frame.label] += 1
 
 
 def run_preprocess(
@@ -295,42 +337,43 @@ def run_preprocess(
     stats.video_counts["real"] = sum(1 for item in items if item.label == "real")
     stats.video_counts["fake"] = sum(1 for item in items if item.label == "fake")
 
-    splits = split_items_by_label(items, seed=seed)
     detector = SCRFDDetector(str(scrfd_model))
+    temp_dir = Path(tempfile.mkdtemp(prefix=".frame_split_", dir=str(output_root)))
+    extracted_frames: List[ExtractedFrame] = []
 
-    for split in SPLITS:
+    try:
         for label in LABELS:
-            split_items = splits[split][label]
+            label_items = sorted((item for item in items if item.label == label), key=lambda item: str(item.path))
             frames_per_video = frames_per_real_video if label == "real" else frames_per_fake_video
-            desc = f"{dataset_name} {split}/{label}"
-            for item in tqdm(split_items, desc=desc, unit="video"):
-                process_video(
-                    item=item,
-                    input_root=input_root,
-                    output_root=output_root,
-                    dataset_name=dataset_name,
-                    split=split,
-                    num_frames=frames_per_video,
-                    detector=detector,
-                    img_size=img_size,
-                    stats=stats,
+            desc = f"{dataset_name} extract {label}"
+            for item in tqdm(label_items, desc=desc, unit="video"):
+                extracted_frames.extend(
+                    process_video(
+                        item=item,
+                        input_root=input_root,
+                        temp_dir=temp_dir,
+                        num_frames=frames_per_video,
+                        detector=detector,
+                        img_size=img_size,
+                        stats=stats,
+                    )
                 )
 
-    print_summary(stats, splits)
+        frame_splits = split_extracted_frames(extracted_frames, seed=seed)
+        move_frames_to_splits(frame_splits, output_root, dataset_name, stats)
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+    print_summary(stats)
 
 
-def print_summary(stats: Stats, splits: Dict[str, Dict[str, List[VideoItem]]]) -> None:
+def print_summary(stats: Stats) -> None:
     print("\n========== Preprocess summary ==========")
     print(f"Videos real: {stats.video_counts['real']}")
     print(f"Videos fake: {stats.video_counts['fake']}")
-    print("\nVideo split counts:")
-    for split in SPLITS:
-        print(
-            f"  {split}: real={len(splits[split]['real'])}, "
-            f"fake={len(splits[split]['fake'])}"
-        )
 
-    print("\nSaved face images:")
+    print("\nSaved face images after frame-level split:")
     for split in SPLITS:
         print(
             f"  {split}: real={stats.image_counts[split]['real']}, "
