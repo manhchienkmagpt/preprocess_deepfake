@@ -2,7 +2,7 @@ from utils import build_arg_parser, run_preprocess
 
 
 def main() -> None:
-    parser = build_arg_parser("Preprocess FaceForensics++ videos with SCRFD face detection")
+    parser = build_arg_parser("Preprocess FaceForensics++ FaceShifter videos with SCRFD face detection")
     args = parser.parse_args()
 
     run_preprocess(
@@ -12,8 +12,8 @@ def main() -> None:
         scrfd_model=args.scrfd_model,
         img_size=args.img_size,
         seed=args.seed,
-        real_dirs=("original",),
-        fake_dirs=("Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures", "FaceShifter"),
+        real_dirs=(),
+        fake_dirs=("FaceShifter",),
         frames_per_real_video=32,
         frames_per_fake_video=32,
         split_by_video_source=True,

@@ -61,6 +61,19 @@ FF++ settings:
 - `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`: fake videos, 32 sampled frames per video.
 - Videos are sorted inside each source folder and split before frame extraction: the first 720 videos go to train, the next 140 go to val, and the remaining videos go to test. This keeps matching FF++ videos aligned across `original`, `Deepfakes`, `Face2Face`, `FaceSwap`, and `NeuralTextures`.
 
+If the base FF++ preprocess was already run and you only need to add `FaceShifter`, run the separate script:
+
+```bash
+python preprocess_ffpp_faceshifter_scrfd.py ^
+  --input_root "D:/datasets/FF++" ^
+  --output_root "D:/datasets/ffpp_faces_scrfd" ^
+  --scrfd_model "models/scrfd_10g_bnkps.onnx" ^
+  --img_size 224 ^
+  --seed 42
+```
+
+`FaceShifter` uses the same video split rule: first 720 videos for train, next 140 for val, and the remaining videos for test.
+
 ## CelebDF-v2 Preprocess
 
 Expected input:
@@ -135,18 +148,21 @@ output_root/
 |   |__ Face2Face/
 |   |__ FaceSwap/
 |   |__ NeuralTextures/
+|   |__ FaceShifter/
 |__ val/
 |   |__ original/
 |   |__ Deepfakes/
 |   |__ Face2Face/
 |   |__ FaceSwap/
 |   |__ NeuralTextures/
+|   |__ FaceShifter/
 |__ test/
     |__ original/
     |__ Deepfakes/
     |__ Face2Face/
     |__ FaceSwap/
     |__ NeuralTextures/
+    |__ FaceShifter/
 ```
 
 CelebDF-v2 is grouped by split and label:
