@@ -39,7 +39,9 @@ class VideoItem:
 class ExtractedFrame:
     temp_path: Path
     label: str
+    source: str
     video_id: str
+    sample_index: int
     frame_index: int
 
 
@@ -49,6 +51,12 @@ class Stats:
     image_counts: Dict[str, Dict[str, int]] = field(
         default_factory=lambda: {
             split: {"real": 0, "fake": 0}
+            for split in SPLITS
+        }
+    )
+    source_image_counts: Dict[str, Dict[str, int]] = field(
+        default_factory=lambda: {
+            split: {}
             for split in SPLITS
         }
     )
@@ -120,7 +128,7 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--output_root", required=True, type=Path, help="Folder to write cropped face images")
     parser.add_argument("--scrfd_model", required=True, type=Path, help="Path to SCRFD ONNX model")
     parser.add_argument("--img_size", default=380, type=int, help="Output face crop size in pixels")
-    parser.add_argument("--seed", default=42, type=int, help="Random seed for frame-level split")
+    parser.add_argument("--seed", default=42, type=int, help="Random seed for dataset split")
     return parser
 
 
@@ -155,14 +163,19 @@ def ensure_output_dirs(output_root: Path) -> None:
             (output_root / split / label).mkdir(parents=True, exist_ok=True)
 
 
+def ensure_source_output_dirs(output_root: Path, sources: Sequence[str]) -> None:
+    for split in SPLITS:
+        for source in sources:
+            (output_root / split / source).mkdir(parents=True, exist_ok=True)
+
+
 def evenly_spaced_frame_indices(total_frames: int, num_frames: int) -> List[int]:
     if total_frames <= 0 or num_frames <= 0:
         return []
 
-    count = min(total_frames, num_frames)
     # Endpoint sampling spreads frames over the full video instead of taking a leading burst.
-    indices = np.linspace(0, total_frames - 1, num=count, dtype=np.int64)
-    return sorted(set(int(idx) for idx in indices))
+    indices = np.linspace(0, total_frames - 1, num=num_frames, dtype=np.int64)
+    return [int(idx) for idx in indices]
 
 
 def crop_with_margin(image_bgr: np.ndarray, bbox: np.ndarray, margin: float = 0.2) -> Optional[np.ndarray]:
@@ -210,9 +223,13 @@ def final_frame_path(
     split: str,
     label: str,
     video_id: str,
+    sample_index: int,
     frame_index: int,
 ) -> Path:
-    filename = f"{dataset_name}_{split}_{label}_{video_id}_frame{frame_index:06d}.jpg"
+    filename = (
+        f"{dataset_name}_{split}_{label}_{video_id}_"
+        f"sample{sample_index:06d}_frame{frame_index:06d}.jpg"
+    )
     return output_root / split / label / filename
 
 
@@ -241,7 +258,7 @@ def process_video(
         return extracted
 
     video_id = safe_video_id(item.path, input_root)
-    for frame_index in frame_indices:
+    for sample_index, frame_index in enumerate(frame_indices):
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -258,14 +275,19 @@ def process_video(
             stats.skipped_no_face += 1
             continue
 
-        temp_filename = f"{item.label}_{video_id}_frame{frame_index:06d}.jpg"
+        temp_filename = (
+            f"{item.label}_{video_id}_sample{sample_index:06d}_"
+            f"frame{frame_index:06d}.jpg"
+        )
         temp_path = temp_dir / temp_filename
         if write_face(face, temp_path, img_size):
             extracted.append(
                 ExtractedFrame(
                     temp_path=temp_path,
                     label=item.label,
+                    source=item.source,
                     video_id=video_id,
+                    sample_index=sample_index,
                     frame_index=frame_index,
                 )
             )
@@ -290,6 +312,39 @@ def split_extracted_frames(frames: Sequence[ExtractedFrame], seed: int) -> Dict[
     }
 
 
+def split_videos_by_source(
+    items: Sequence[VideoItem],
+    seed: int,
+    ratio: Tuple[int, int, int] = (720, 140, 140),
+) -> Dict[str, List[VideoItem]]:
+    rng = random.Random(seed)
+    by_source: Dict[str, List[VideoItem]] = {}
+    for item in items:
+        by_source.setdefault(item.source, []).append(item)
+
+    ratio_total = sum(ratio)
+    if ratio_total <= 0:
+        raise ValueError("Split ratio total must be positive")
+
+    splits: Dict[str, List[VideoItem]] = {split: [] for split in SPLITS}
+    for source, source_items in sorted(by_source.items()):
+        shuffled = sorted(source_items, key=lambda item: str(item.path))
+        rng.shuffle(shuffled)
+
+        n_items = len(shuffled)
+        n_train = int(n_items * ratio[0] / ratio_total)
+        n_val = int(n_items * ratio[1] / ratio_total)
+
+        splits["train"].extend(shuffled[:n_train])
+        splits["val"].extend(shuffled[n_train:n_train + n_val])
+        splits["test"].extend(shuffled[n_train + n_val:])
+
+    for split in SPLITS:
+        splits[split] = sorted(splits[split], key=lambda item: (item.source, str(item.path)))
+
+    return splits
+
+
 def move_frames_to_splits(
     frames_by_split: Dict[str, List[ExtractedFrame]],
     output_root: Path,
@@ -304,10 +359,88 @@ def move_frames_to_splits(
                 split=split,
                 label=frame.label,
                 video_id=frame.video_id,
+                sample_index=frame.sample_index,
                 frame_index=frame.frame_index,
             )
             shutil.move(str(frame.temp_path), str(output_path))
             stats.image_counts[split][frame.label] += 1
+
+
+def final_source_frame_path(
+    output_root: Path,
+    dataset_name: str,
+    split: str,
+    source: str,
+    video_id: str,
+    sample_index: int,
+    frame_index: int,
+) -> Path:
+    filename = (
+        f"{dataset_name}_{split}_{source}_{video_id}_"
+        f"sample{sample_index:06d}_frame{frame_index:06d}.jpg"
+    )
+    return output_root / split / source / filename
+
+
+def process_video_to_source_split(
+    item: VideoItem,
+    input_root: Path,
+    output_root: Path,
+    dataset_name: str,
+    split: str,
+    num_frames: int,
+    detector: SCRFDDetector,
+    img_size: int,
+    stats: Stats,
+) -> None:
+    cap = cv2.VideoCapture(str(item.path))
+    if not cap.isOpened():
+        print(f"[WARN] Cannot open video: {item.path}")
+        stats.failed_videos += 1
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_indices = evenly_spaced_frame_indices(total_frames, num_frames)
+    if not frame_indices:
+        print(f"[WARN] Empty or unreadable video: {item.path}")
+        stats.failed_videos += 1
+        cap.release()
+        return
+
+    video_id = safe_video_id(item.path, input_root)
+    for sample_index, frame_index in enumerate(frame_indices):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            stats.skipped_no_face += 1
+            continue
+
+        bbox = detector.largest_face(frame)
+        if bbox is None:
+            stats.skipped_no_face += 1
+            continue
+
+        face = crop_with_margin(frame, bbox, margin=0.2)
+        if face is None:
+            stats.skipped_no_face += 1
+            continue
+
+        output_path = final_source_frame_path(
+            output_root=output_root,
+            dataset_name=dataset_name,
+            split=split,
+            source=item.source,
+            video_id=video_id,
+            sample_index=sample_index,
+            frame_index=frame_index,
+        )
+        if write_face(face, output_path, img_size):
+            stats.image_counts[split][item.label] += 1
+            stats.source_image_counts[split][item.source] = (
+                stats.source_image_counts[split].get(item.source, 0) + 1
+            )
+
+    cap.release()
 
 
 def run_preprocess(
@@ -321,13 +454,13 @@ def run_preprocess(
     fake_dirs: Sequence[str],
     frames_per_real_video: int,
     frames_per_fake_video: int,
+    split_by_video_source: bool = False,
+    video_split_ratio: Tuple[int, int, int] = (720, 140, 140),
 ) -> None:
     if not input_root.exists():
         raise FileNotFoundError(f"Input root not found: {input_root}")
     if img_size <= 0:
         raise ValueError("--img_size must be a positive integer")
-
-    ensure_output_dirs(output_root)
 
     items = collect_videos(input_root, real_dirs, fake_dirs)
     if not items:
@@ -338,6 +471,30 @@ def run_preprocess(
     stats.video_counts["fake"] = sum(1 for item in items if item.label == "fake")
 
     detector = SCRFDDetector(str(scrfd_model))
+
+    if split_by_video_source:
+        ensure_source_output_dirs(output_root, (*real_dirs, *fake_dirs))
+        video_splits = split_videos_by_source(items, seed=seed, ratio=video_split_ratio)
+        for split in SPLITS:
+            desc = f"{dataset_name} extract {split}"
+            for item in tqdm(video_splits[split], desc=desc, unit="video"):
+                frames_per_video = frames_per_real_video if item.label == "real" else frames_per_fake_video
+                process_video_to_source_split(
+                    item=item,
+                    input_root=input_root,
+                    output_root=output_root,
+                    dataset_name=dataset_name,
+                    split=split,
+                    num_frames=frames_per_video,
+                    detector=detector,
+                    img_size=img_size,
+                    stats=stats,
+                )
+
+        print_summary(stats)
+        return
+
+    ensure_output_dirs(output_root)
     temp_dir = Path(tempfile.mkdtemp(prefix=".frame_split_", dir=str(output_root)))
     extracted_frames: List[ExtractedFrame] = []
 
@@ -373,12 +530,18 @@ def print_summary(stats: Stats) -> None:
     print(f"Videos real: {stats.video_counts['real']}")
     print(f"Videos fake: {stats.video_counts['fake']}")
 
-    print("\nSaved face images after frame-level split:")
+    print("\nSaved face images:")
     for split in SPLITS:
         print(
             f"  {split}: real={stats.image_counts[split]['real']}, "
             f"fake={stats.image_counts[split]['fake']}"
         )
+        if stats.source_image_counts[split]:
+            source_counts = ", ".join(
+                f"{source}={count}"
+                for source, count in sorted(stats.source_image_counts[split].items())
+            )
+            print(f"    by source: {source_counts}")
 
     print(f"\nSkipped frames without detected face/readable crop: {stats.skipped_no_face}")
     print(f"Failed videos: {stats.failed_videos}")

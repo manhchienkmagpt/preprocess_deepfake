@@ -14,8 +14,10 @@ def main() -> None:
         seed=args.seed,
         real_dirs=("original",),
         fake_dirs=("Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"),
-        frames_per_real_video=128,
+        frames_per_real_video=32,
         frames_per_fake_video=32,
+        split_by_video_source=True,
+        video_split_ratio=(720, 140, 140),
     )
 
 

@@ -57,8 +57,9 @@ python preprocess_ffpp_scrfd.py \
 
 FF++ settings:
 
-- `original`: real videos, 128 sampled frames per video.
+- `original`: real videos, 32 sampled frames per video.
 - `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`: fake videos, 32 sampled frames per video.
+- Videos are split first inside each source folder with a 720:140:140 train/val/test ratio, then frames are extracted. Frames from the same video never appear in more than one split.
 
 ## CelebDF-v2 Preprocess
 
@@ -100,7 +101,31 @@ CelebDF-v2 settings:
 
 ## Output Structure
 
-The scripts extract the configured number of frames from every video first, then shuffle all successfully saved face crops with `--seed` and split them into train/val/test using an 80:10:10 ratio. Because splitting happens at frame level, frames from the same source video can appear in more than one split.
+For FaceForensics++, output is grouped by split first and then by original source folder:
+
+```text
+output_root/
+|__ train/
+|   |__ original/
+|   |__ Deepfakes/
+|   |__ Face2Face/
+|   |__ FaceSwap/
+|   |__ NeuralTextures/
+|__ val/
+|   |__ original/
+|   |__ Deepfakes/
+|   |__ Face2Face/
+|   |__ FaceSwap/
+|   |__ NeuralTextures/
+|__ test/
+    |__ original/
+    |__ Deepfakes/
+    |__ Face2Face/
+    |__ FaceSwap/
+    |__ NeuralTextures/
+```
+
+CelebDF-v2 keeps the previous frame-level split behavior:
 
 ```text
 output_root/
@@ -115,12 +140,12 @@ output_root/
     └── fake/
 ```
 
-The `real` and `fake` folders contain only face crop images, without per-video subfolders. File names include dataset name, split, label, source video id, and frame index.
+The output folders contain only face crop images, without per-video subfolders. File names include dataset name, split, source or label, source video id, and frame index.
 
 Example:
 
 ```text
-ffpp_train_fake_Deepfakes_001_002_frame000128.jpg
+ffpp_train_Deepfakes_Deepfakes_001_002_sample000005_frame000128.jpg
 ```
 
 At the end, each script prints:
