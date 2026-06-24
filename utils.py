@@ -177,6 +177,12 @@ def ensure_output_dirs(output_root: Path) -> None:
             (output_root / split / label).mkdir(parents=True, exist_ok=True)
 
 
+def ensure_label_output_dirs(output_root: Path, splits: Sequence[str]) -> None:
+    for split in splits:
+        for label in LABELS:
+            (output_root / split / label).mkdir(parents=True, exist_ok=True)
+
+
 def ensure_source_output_dirs(output_root: Path, sources: Sequence[str]) -> None:
     for split in SPLITS:
         for source in sources:
@@ -578,7 +584,14 @@ def process_video_to_label_split(
     cap.release()
 
 
-def run_preprocess_celebdf(
+def resolve_celebdf_test_list(input_root: Path, test_list: Optional[str]) -> Path:
+    test_list_path = Path(test_list) if test_list else input_root / "List_of_testing_videos.txt"
+    if not test_list_path.is_absolute():
+        test_list_path = input_root / test_list_path
+    return test_list_path
+
+
+def run_preprocess_celebdf_train_val(
     input_root: Path,
     output_root: Path,
     scrfd_model: Path,
@@ -592,10 +605,6 @@ def run_preprocess_celebdf(
     if img_size <= 0:
         raise ValueError("--img_size must be a positive integer")
 
-    test_list_path = Path(test_list) if test_list else input_root / "List_of_testing_videos.txt"
-    if not test_list_path.is_absolute():
-        test_list_path = input_root / test_list_path
-
     real_dirs = ("Celeb-real", "YouTube-real")
     fake_dirs = ("Celeb-synthesis",)
     frames_per_video = 32
@@ -604,6 +613,7 @@ def run_preprocess_celebdf(
     if not all_items:
         raise RuntimeError(f"No videos found under: {input_root}")
 
+    test_list_path = resolve_celebdf_test_list(input_root, test_list)
     test_items = parse_celebdf_test_list(test_list_path, input_root)
     test_paths = {str(item.path.resolve()).lower() for item in test_items}
     train_val_items = [
@@ -615,16 +625,15 @@ def run_preprocess_celebdf(
         raise RuntimeError("No CelebDF videos remain for train/val after excluding the test list")
 
     video_splits = split_train_val_videos(train_val_items, seed=seed, train_ratio=0.8)
-    video_splits["test"] = sorted(test_items, key=lambda item: (item.label, natural_path_key(item.path)))
 
     stats = Stats()
-    stats.video_counts["real"] = sum(1 for item in all_items if item.label == "real")
-    stats.video_counts["fake"] = sum(1 for item in all_items if item.label == "fake")
+    stats.video_counts["real"] = sum(1 for item in train_val_items if item.label == "real")
+    stats.video_counts["fake"] = sum(1 for item in train_val_items if item.label == "fake")
 
-    ensure_output_dirs(output_root)
+    ensure_label_output_dirs(output_root, ("train", "val"))
     detector = SCRFDDetector(str(scrfd_model))
 
-    for split in SPLITS:
+    for split in ("train", "val"):
         desc = f"celebdf extract {split}"
         for item in tqdm(video_splits[split], desc=desc, unit="video"):
             process_video_to_label_split(
@@ -640,6 +649,72 @@ def run_preprocess_celebdf(
             )
 
     print_summary(stats)
+
+
+def run_preprocess_celebdf_test(
+    input_root: Path,
+    output_root: Path,
+    scrfd_model: Path,
+    img_size: int,
+    test_list: Optional[str] = None,
+) -> None:
+    input_root = input_root.resolve()
+    if not input_root.exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+    if img_size <= 0:
+        raise ValueError("--img_size must be a positive integer")
+
+    frames_per_video = 32
+    test_list_path = resolve_celebdf_test_list(input_root, test_list)
+    test_items = parse_celebdf_test_list(test_list_path, input_root)
+    test_items = sorted(test_items, key=lambda item: (item.label, natural_path_key(item.path)))
+
+    stats = Stats()
+    stats.video_counts["real"] = sum(1 for item in test_items if item.label == "real")
+    stats.video_counts["fake"] = sum(1 for item in test_items if item.label == "fake")
+
+    ensure_label_output_dirs(output_root, ("test",))
+    detector = SCRFDDetector(str(scrfd_model))
+
+    for item in tqdm(test_items, desc="celebdf extract test", unit="video"):
+        process_video_to_label_split(
+            item=item,
+            input_root=input_root,
+            output_root=output_root,
+            dataset_name="celebdf",
+            split="test",
+            num_frames=frames_per_video,
+            detector=detector,
+            img_size=img_size,
+            stats=stats,
+        )
+
+    print_summary(stats)
+
+
+def run_preprocess_celebdf(
+    input_root: Path,
+    output_root: Path,
+    scrfd_model: Path,
+    img_size: int,
+    seed: int,
+    test_list: Optional[str] = None,
+) -> None:
+    run_preprocess_celebdf_train_val(
+        input_root=input_root,
+        output_root=output_root,
+        scrfd_model=scrfd_model,
+        img_size=img_size,
+        seed=seed,
+        test_list=test_list,
+    )
+    run_preprocess_celebdf_test(
+        input_root=input_root,
+        output_root=output_root,
+        scrfd_model=scrfd_model,
+        img_size=img_size,
+        test_list=test_list,
+    )
 
 
 def run_preprocess(

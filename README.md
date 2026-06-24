@@ -72,10 +72,10 @@ celeb_root_folder/
 └── YouTube-real/
 ```
 
-Run:
+Run train/val:
 
 ```bash
-python preprocess_celebdf_scrfd.py ^
+python preprocess_celebdf_train_val_scrfd.py ^
   --input_root "D:/datasets/CelebDF-v2" ^
   --output_root "D:/datasets/celebdf_faces_scrfd" ^
   --scrfd_model "models/scrfd_10g_bnkps.onnx" ^
@@ -84,15 +84,35 @@ python preprocess_celebdf_scrfd.py ^
   --test_list "D:/datasets/CelebDF-v2/List_of_testing_videos.txt"
 ```
 
+Run test:
+
+```bash
+python preprocess_celebdf_test_scrfd.py ^
+  --input_root "D:/datasets/CelebDF-v2" ^
+  --output_root "D:/datasets/celebdf_faces_scrfd" ^
+  --scrfd_model "models/scrfd_10g_bnkps.onnx" ^
+  --img_size 224 ^
+  --test_list "D:/datasets/CelebDF-v2/List_of_testing_videos.txt"
+```
+
 Linux/Kaggle:
 
 ```bash
-python preprocess_celebdf_scrfd.py \
+python preprocess_celebdf_train_val_scrfd.py \
   --input_root "/kaggle/input/celebdf-v2" \
   --output_root "/kaggle/working/celebdf_faces_scrfd" \
   --scrfd_model "models/scrfd_10g_bnkps.onnx" \
   --img_size 224 \
   --seed 42 \
+  --test_list "/kaggle/input/celebdf-v2/List_of_testing_videos.txt"
+```
+
+```bash
+python preprocess_celebdf_test_scrfd.py \
+  --input_root "/kaggle/input/celebdf-v2" \
+  --output_root "/kaggle/working/celebdf_faces_scrfd" \
+  --scrfd_model "models/scrfd_10g_bnkps.onnx" \
+  --img_size 224 \
   --test_list "/kaggle/input/celebdf-v2/List_of_testing_videos.txt"
 ```
 
