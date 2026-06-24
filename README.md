@@ -59,7 +59,7 @@ FF++ settings:
 
 - `original`: real videos, 32 sampled frames per video.
 - `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`: fake videos, 32 sampled frames per video.
-- Videos are split first inside each source folder with a 720:140:140 train/val/test ratio, then frames are extracted. Frames from the same video never appear in more than one split.
+- Videos are sorted inside each source folder and split before frame extraction: the first 720 videos go to train, the next 140 go to val, and the remaining videos go to test. This keeps matching FF++ videos aligned across `original`, `Deepfakes`, `Face2Face`, `FaceSwap`, and `NeuralTextures`.
 
 ## CelebDF-v2 Preprocess
 

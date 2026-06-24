@@ -138,10 +138,24 @@ def find_videos(folder: Path) -> List[Path]:
         return []
 
     return sorted(
-        path
-        for path in folder.rglob("*")
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        (
+            path
+            for path in folder.rglob("*")
+            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        ),
+        key=natural_path_key,
     )
+
+
+def natural_path_key(path: Path) -> Tuple[object, ...]:
+    parts: List[object] = []
+    for part in path.parts:
+        for token in re.split(r"(\d+)", part.lower()):
+            if token.isdigit():
+                parts.append(int(token))
+            elif token:
+                parts.append(token)
+    return tuple(parts)
 
 
 def collect_videos(input_root: Path, real_dirs: Sequence[str], fake_dirs: Sequence[str]) -> List[VideoItem]:
@@ -314,33 +328,27 @@ def split_extracted_frames(frames: Sequence[ExtractedFrame], seed: int) -> Dict[
 
 def split_videos_by_source(
     items: Sequence[VideoItem],
-    seed: int,
-    ratio: Tuple[int, int, int] = (720, 140, 140),
+    counts: Tuple[int, int, int] = (720, 140, 140),
 ) -> Dict[str, List[VideoItem]]:
-    rng = random.Random(seed)
     by_source: Dict[str, List[VideoItem]] = {}
     for item in items:
         by_source.setdefault(item.source, []).append(item)
 
-    ratio_total = sum(ratio)
-    if ratio_total <= 0:
-        raise ValueError("Split ratio total must be positive")
+    if any(count < 0 for count in counts):
+        raise ValueError("Split counts must be non-negative")
 
     splits: Dict[str, List[VideoItem]] = {split: [] for split in SPLITS}
     for source, source_items in sorted(by_source.items()):
-        shuffled = sorted(source_items, key=lambda item: str(item.path))
-        rng.shuffle(shuffled)
+        ordered = sorted(source_items, key=lambda item: natural_path_key(item.path))
+        n_train = min(counts[0], len(ordered))
+        n_val = min(counts[1], max(0, len(ordered) - n_train))
 
-        n_items = len(shuffled)
-        n_train = int(n_items * ratio[0] / ratio_total)
-        n_val = int(n_items * ratio[1] / ratio_total)
-
-        splits["train"].extend(shuffled[:n_train])
-        splits["val"].extend(shuffled[n_train:n_train + n_val])
-        splits["test"].extend(shuffled[n_train + n_val:])
+        splits["train"].extend(ordered[:n_train])
+        splits["val"].extend(ordered[n_train:n_train + n_val])
+        splits["test"].extend(ordered[n_train + n_val:])
 
     for split in SPLITS:
-        splits[split] = sorted(splits[split], key=lambda item: (item.source, str(item.path)))
+        splits[split] = sorted(splits[split], key=lambda item: (item.source, natural_path_key(item.path)))
 
     return splits
 
@@ -455,7 +463,7 @@ def run_preprocess(
     frames_per_real_video: int,
     frames_per_fake_video: int,
     split_by_video_source: bool = False,
-    video_split_ratio: Tuple[int, int, int] = (720, 140, 140),
+    video_split_counts: Tuple[int, int, int] = (720, 140, 140),
 ) -> None:
     if not input_root.exists():
         raise FileNotFoundError(f"Input root not found: {input_root}")
@@ -474,7 +482,7 @@ def run_preprocess(
 
     if split_by_video_source:
         ensure_source_output_dirs(output_root, (*real_dirs, *fake_dirs))
-        video_splits = split_videos_by_source(items, seed=seed, ratio=video_split_ratio)
+        video_splits = split_videos_by_source(items, counts=video_split_counts)
         for split in SPLITS:
             desc = f"{dataset_name} extract {split}"
             for item in tqdm(video_splits[split], desc=desc, unit="video"):
