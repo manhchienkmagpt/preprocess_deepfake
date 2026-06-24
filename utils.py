@@ -353,6 +353,75 @@ def split_videos_by_source(
     return splits
 
 
+def parse_celebdf_test_list(test_list_path: Path, input_root: Path) -> List[VideoItem]:
+    if not test_list_path.is_file():
+        raise FileNotFoundError(f"CelebDF test list not found: {test_list_path}")
+
+    items: List[VideoItem] = []
+    with test_list_path.open("r", encoding="utf-8") as file:
+        for line_number, raw_line in enumerate(file, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                raise ValueError(
+                    f"Invalid CelebDF test list line {line_number}: expected '<label> <relative_video_path>'"
+                )
+
+            raw_label, relative_video = parts
+            relative_path = Path(relative_video.replace("\\", "/"))
+            if raw_label == "1":
+                label = "real"
+            elif raw_label == "0":
+                label = "fake"
+            else:
+                raise ValueError(
+                    f"Invalid CelebDF test label on line {line_number}: {raw_label!r}. "
+                    "Use 1 for real and 0 for fake."
+                )
+
+            video_path = input_root / relative_path
+            if not video_path.is_file():
+                raise FileNotFoundError(
+                    f"CelebDF test video from line {line_number} not found: {video_path}"
+                )
+            if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise ValueError(f"CelebDF test path is not a supported video on line {line_number}: {video_path}")
+
+            source = relative_path.parts[0] if relative_path.parts else video_path.parent.name
+            items.append(VideoItem(path=video_path, label=label, source=source))
+
+    if not items:
+        raise RuntimeError(f"CelebDF test list is empty: {test_list_path}")
+
+    return items
+
+
+def split_train_val_videos(
+    items: Sequence[VideoItem],
+    seed: int,
+    train_ratio: float = 0.8,
+) -> Dict[str, List[VideoItem]]:
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be between 0 and 1")
+
+    rng = random.Random(seed)
+    splits: Dict[str, List[VideoItem]] = {"train": [], "val": [], "test": []}
+    for label in LABELS:
+        label_items = sorted((item for item in items if item.label == label), key=lambda item: natural_path_key(item.path))
+        rng.shuffle(label_items)
+        n_train = int(len(label_items) * train_ratio)
+        splits["train"].extend(label_items[:n_train])
+        splits["val"].extend(label_items[n_train:])
+
+    for split in ("train", "val"):
+        splits[split] = sorted(splits[split], key=lambda item: (item.label, natural_path_key(item.path)))
+
+    return splits
+
+
 def move_frames_to_splits(
     frames_by_split: Dict[str, List[ExtractedFrame]],
     output_root: Path,
@@ -449,6 +518,128 @@ def process_video_to_source_split(
             )
 
     cap.release()
+
+
+def process_video_to_label_split(
+    item: VideoItem,
+    input_root: Path,
+    output_root: Path,
+    dataset_name: str,
+    split: str,
+    num_frames: int,
+    detector: SCRFDDetector,
+    img_size: int,
+    stats: Stats,
+) -> None:
+    cap = cv2.VideoCapture(str(item.path))
+    if not cap.isOpened():
+        print(f"[WARN] Cannot open video: {item.path}")
+        stats.failed_videos += 1
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_indices = evenly_spaced_frame_indices(total_frames, num_frames)
+    if not frame_indices:
+        print(f"[WARN] Empty or unreadable video: {item.path}")
+        stats.failed_videos += 1
+        cap.release()
+        return
+
+    video_id = safe_video_id(item.path, input_root)
+    for sample_index, frame_index in enumerate(frame_indices):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            stats.skipped_no_face += 1
+            continue
+
+        bbox = detector.largest_face(frame)
+        if bbox is None:
+            stats.skipped_no_face += 1
+            continue
+
+        face = crop_with_margin(frame, bbox, margin=0.2)
+        if face is None:
+            stats.skipped_no_face += 1
+            continue
+
+        output_path = final_frame_path(
+            output_root=output_root,
+            dataset_name=dataset_name,
+            split=split,
+            label=item.label,
+            video_id=video_id,
+            sample_index=sample_index,
+            frame_index=frame_index,
+        )
+        if write_face(face, output_path, img_size):
+            stats.image_counts[split][item.label] += 1
+
+    cap.release()
+
+
+def run_preprocess_celebdf(
+    input_root: Path,
+    output_root: Path,
+    scrfd_model: Path,
+    img_size: int,
+    seed: int,
+    test_list: Optional[str] = None,
+) -> None:
+    input_root = input_root.resolve()
+    if not input_root.exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+    if img_size <= 0:
+        raise ValueError("--img_size must be a positive integer")
+
+    test_list_path = Path(test_list) if test_list else input_root / "List_of_testing_videos.txt"
+    if not test_list_path.is_absolute():
+        test_list_path = input_root / test_list_path
+
+    real_dirs = ("Celeb-real", "YouTube-real")
+    fake_dirs = ("Celeb-synthesis",)
+    frames_per_video = 32
+
+    all_items = collect_videos(input_root, real_dirs, fake_dirs)
+    if not all_items:
+        raise RuntimeError(f"No videos found under: {input_root}")
+
+    test_items = parse_celebdf_test_list(test_list_path, input_root)
+    test_paths = {str(item.path.resolve()).lower() for item in test_items}
+    train_val_items = [
+        item
+        for item in all_items
+        if str(item.path.resolve()).lower() not in test_paths
+    ]
+    if not train_val_items:
+        raise RuntimeError("No CelebDF videos remain for train/val after excluding the test list")
+
+    video_splits = split_train_val_videos(train_val_items, seed=seed, train_ratio=0.8)
+    video_splits["test"] = sorted(test_items, key=lambda item: (item.label, natural_path_key(item.path)))
+
+    stats = Stats()
+    stats.video_counts["real"] = sum(1 for item in all_items if item.label == "real")
+    stats.video_counts["fake"] = sum(1 for item in all_items if item.label == "fake")
+
+    ensure_output_dirs(output_root)
+    detector = SCRFDDetector(str(scrfd_model))
+
+    for split in SPLITS:
+        desc = f"celebdf extract {split}"
+        for item in tqdm(video_splits[split], desc=desc, unit="video"):
+            process_video_to_label_split(
+                item=item,
+                input_root=input_root,
+                output_root=output_root,
+                dataset_name="celebdf",
+                split=split,
+                num_frames=frames_per_video,
+                detector=detector,
+                img_size=img_size,
+                stats=stats,
+            )
+
+    print_summary(stats)
 
 
 def run_preprocess(

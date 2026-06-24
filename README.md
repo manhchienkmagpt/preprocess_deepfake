@@ -80,7 +80,8 @@ python preprocess_celebdf_scrfd.py ^
   --output_root "D:/datasets/celebdf_faces_scrfd" ^
   --scrfd_model "models/scrfd_10g_bnkps.onnx" ^
   --img_size 224 ^
-  --seed 42
+  --seed 42 ^
+  --test_list "D:/datasets/CelebDF-v2/List_of_testing_videos.txt"
 ```
 
 Linux/Kaggle:
@@ -91,13 +92,16 @@ python preprocess_celebdf_scrfd.py \
   --output_root "/kaggle/working/celebdf_faces_scrfd" \
   --scrfd_model "models/scrfd_10g_bnkps.onnx" \
   --img_size 224 \
-  --seed 42
+  --seed 42 \
+  --test_list "/kaggle/input/celebdf-v2/List_of_testing_videos.txt"
 ```
 
 CelebDF-v2 settings:
 
-- `Celeb-real`, `YouTube-real`: real videos, 128 sampled frames per video.
-- `Celeb-synthesis`: fake videos, 21 sampled frames per video.
+- `Celeb-real`, `YouTube-real`: real videos, 32 sampled frames per video.
+- `Celeb-synthesis`: fake videos, 32 sampled frames per video.
+- Train/val videos are split 8:2 after removing videos listed in the test txt.
+- Test videos are read from the txt file. Label `1` is saved under `test/real`; label `0` is saved under `test/fake`.
 
 ## Output Structure
 
@@ -125,7 +129,7 @@ output_root/
     |__ NeuralTextures/
 ```
 
-CelebDF-v2 keeps the previous frame-level split behavior:
+CelebDF-v2 is grouped by split and label:
 
 ```text
 output_root/
