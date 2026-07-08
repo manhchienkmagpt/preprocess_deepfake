@@ -122,11 +122,76 @@ class SCRFDDetector:
         return bboxes[int(np.argmax(areas))]
 
 
+class MTCNNDetector:
+    """Face detector wrapper with the same largest_face API as SCRFDDetector."""
+
+    def __init__(
+        self,
+        min_face_size: int = 20,
+        thresholds: Tuple[float, float, float] = (0.6, 0.7, 0.7),
+        prefer_gpu: bool = True,
+    ) -> None:
+        try:
+            import torch
+            from facenet_pytorch import MTCNN
+        except ImportError as exc:
+            raise RuntimeError(
+                "Missing MTCNN dependencies. Install with: "
+                "pip install facenet-pytorch torch opencv-python tqdm numpy"
+            ) from exc
+
+        use_cuda = prefer_gpu and torch.cuda.is_available()
+        self.device = torch.device("cuda:0" if use_cuda else "cpu")
+        if prefer_gpu and not use_cuda:
+            print("[WARN] CUDA is unavailable. MTCNN will run on CPU.")
+
+        self.model = MTCNN(
+            keep_all=True,
+            min_face_size=min_face_size,
+            thresholds=thresholds,
+            device=self.device,
+        )
+        print(f"[INFO] Loaded MTCNN detector on device: {self.device}")
+
+    def detect(self, image_bgr: np.ndarray) -> np.ndarray:
+        """Return face boxes as Nx5 arrays: x1, y1, x2, y2, score."""
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        boxes, probs = self.model.detect(image_rgb)
+        if boxes is None or probs is None or len(boxes) == 0:
+            return np.empty((0, 5), dtype=np.float32)
+
+        probs = np.asarray(probs, dtype=np.float32).reshape(-1, 1)
+        boxes = np.asarray(boxes, dtype=np.float32)
+        valid = np.isfinite(boxes).all(axis=1) & np.isfinite(probs[:, 0])
+        if not np.any(valid):
+            return np.empty((0, 5), dtype=np.float32)
+        return np.concatenate([boxes[valid], probs[valid]], axis=1)
+
+    def largest_face(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        bboxes = self.detect(image_bgr)
+        if len(bboxes) == 0:
+            return None
+
+        widths = np.maximum(0.0, bboxes[:, 2] - bboxes[:, 0])
+        heights = np.maximum(0.0, bboxes[:, 3] - bboxes[:, 1])
+        areas = widths * heights
+        return bboxes[int(np.argmax(areas))]
+
+
 def build_arg_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--input_root", required=True, type=Path, help="Root folder of the source videos")
     parser.add_argument("--output_root", required=True, type=Path, help="Folder to write cropped face images")
     parser.add_argument("--scrfd_model", required=True, type=Path, help="Path to SCRFD ONNX model")
+    parser.add_argument("--img_size", default=380, type=int, help="Output face crop size in pixels")
+    parser.add_argument("--seed", default=42, type=int, help="Random seed for dataset split")
+    return parser
+
+
+def build_mtcnn_arg_parser(description: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--input_root", required=True, type=Path, help="Root folder of the source videos")
+    parser.add_argument("--output_root", required=True, type=Path, help="Folder to write cropped face images")
     parser.add_argument("--img_size", default=380, type=int, help="Output face crop size in pixels")
     parser.add_argument("--seed", default=42, type=int, help="Random seed for dataset split")
     return parser
@@ -692,6 +757,46 @@ def run_preprocess_celebdf_test(
     print_summary(stats)
 
 
+def run_preprocess_celebdf_test_mtcnn(
+    input_root: Path,
+    output_root: Path,
+    img_size: int,
+    test_list: Optional[str] = None,
+    frames_per_video: int = 50,
+) -> None:
+    input_root = input_root.resolve()
+    if not input_root.exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+    if img_size <= 0:
+        raise ValueError("--img_size must be a positive integer")
+
+    test_list_path = resolve_celebdf_test_list(input_root, test_list)
+    test_items = parse_celebdf_test_list(test_list_path, input_root)
+    test_items = sorted(test_items, key=lambda item: (item.label, natural_path_key(item.path)))
+
+    stats = Stats()
+    stats.video_counts["real"] = sum(1 for item in test_items if item.label == "real")
+    stats.video_counts["fake"] = sum(1 for item in test_items if item.label == "fake")
+
+    ensure_label_output_dirs(output_root, ("test",))
+    detector = MTCNNDetector()
+
+    for item in tqdm(test_items, desc="celebdf extract test", unit="video"):
+        process_video_to_label_split(
+            item=item,
+            input_root=input_root,
+            output_root=output_root,
+            dataset_name="celebdf",
+            split="test",
+            num_frames=frames_per_video,
+            detector=detector,
+            img_size=img_size,
+            stats=stats,
+        )
+
+    print_summary(stats)
+
+
 def run_preprocess_celebdf(
     input_root: Path,
     output_root: Path,
@@ -795,6 +900,53 @@ def run_preprocess(
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
+
+    print_summary(stats)
+
+
+def run_preprocess_ffpp_mtcnn(
+    input_root: Path,
+    output_root: Path,
+    img_size: int,
+    seed: int,
+    real_dirs: Sequence[str] = ("original",),
+    fake_dirs: Sequence[str] = ("Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures", "FaceShifter"),
+    train_frames_per_video: int = 20,
+    eval_frames_per_video: int = 50,
+    video_split_counts: Tuple[int, int, int] = (720, 140, 140),
+) -> None:
+    if not input_root.exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+    if img_size <= 0:
+        raise ValueError("--img_size must be a positive integer")
+
+    items = collect_videos(input_root, real_dirs, fake_dirs)
+    if not items:
+        raise RuntimeError(f"No videos found under: {input_root}")
+
+    stats = Stats()
+    stats.video_counts["real"] = sum(1 for item in items if item.label == "real")
+    stats.video_counts["fake"] = sum(1 for item in items if item.label == "fake")
+
+    ensure_source_output_dirs(output_root, (*real_dirs, *fake_dirs))
+    detector = MTCNNDetector()
+    video_splits = split_videos_by_source(items, counts=video_split_counts)
+
+    for split in SPLITS:
+        desc = f"ffpp extract {split}"
+        frames_per_video = train_frames_per_video if split == "train" else eval_frames_per_video
+        for item in tqdm(video_splits[split], desc=desc, unit="video"):
+            process_video_to_source_split(
+                item=item,
+                input_root=input_root,
+                output_root=output_root,
+                dataset_name="ffpp",
+                split=split,
+                num_frames=frames_per_video,
+                detector=detector,
+                img_size=img_size,
+                stats=stats,
+            )
 
     print_summary(stats)
 

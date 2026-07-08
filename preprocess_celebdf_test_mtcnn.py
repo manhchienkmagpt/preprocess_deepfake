@@ -1,8 +1,8 @@
-from utils import build_arg_parser, run_preprocess_celebdf
+from utils import build_mtcnn_arg_parser, run_preprocess_celebdf_test_mtcnn
 
 
 def main() -> None:
-    parser = build_arg_parser("Preprocess CelebDF-v2 videos with SCRFD face detection")
+    parser = build_mtcnn_arg_parser("Preprocess CelebDF-v2 test videos with MTCNN face detection")
     parser.add_argument(
         "--test_list",
         type=str,
@@ -11,13 +11,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_preprocess_celebdf(
+    run_preprocess_celebdf_test_mtcnn(
         input_root=args.input_root,
         output_root=args.output_root,
-        scrfd_model=args.scrfd_model,
         img_size=args.img_size,
-        seed=args.seed,
         test_list=args.test_list,
+        frames_per_video=50,
     )
 
 
